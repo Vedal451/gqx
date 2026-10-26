@@ -308,6 +308,8 @@ html[data-theme="dark"] .tabbar{background:rgba(31,27,22,.92)}
 html[data-theme="dark"] .toast{background:rgba(243,237,226,.95);color:#1f1b16}
 html[data-theme="dark"] .btn.primary{background:linear-gradient(145deg,#c0453a,#9c2f26);box-shadow:0 8px 20px rgba(0,0,0,.35)}
 
+#bank-drop{transition:.15s}
+#bank-drop.drag{border-color:var(--brand);background:var(--brand-soft)}
 .empty{text-align:center;padding:48px 20px;color:var(--muted);font-size:13.5px}
 .empty .e{font-size:34px;display:block;margin-bottom:10px;opacity:.6}
 
@@ -354,11 +356,26 @@ html[data-theme="dark"] .btn.primary{background:linear-gradient(145deg,#c0453a,#
 "use strict";
 
 /* ============================ 数据 ============================ */
-var BANK = JSON.parse(document.getElementById("bank-data").textContent);
+var BUILTIN_BANK = JSON.parse(document.getElementById("bank-data").textContent);
+var CUSTOM_BANK_KEY = "qgx49_bank_v1";
+var CUSTOM_BANK = (function(){
+  try{
+    var raw = localStorage.getItem(CUSTOM_BANK_KEY);
+    if(raw){
+      var b = JSON.parse(raw);
+      if(b && b.questions && b.questions.length) return b;
+    }
+  }catch(e){}
+  return null;
+})();
+var BANK = CUSTOM_BANK || BUILTIN_BANK;
 var QS = BANK.questions;
 var Q = {};
 QS.forEach(function(q){ Q[q.id] = q; });
-var TAGS = BANK.meta.tags;
+var TAGS = (BANK.meta && BANK.meta.tags) || [];
+if(!TAGS.length){
+  QS.forEach(function(q){ if(q.tag && TAGS.indexOf(q.tag) < 0) TAGS.push(q.tag); });
+}
 var TYPES = {
   single: {label:"单选题", short:"单选", icon:"①", desc:"四选一 · 共46题"},
   multi:  {label:"多选题", short:"多选", icon:"②", desc:"多选多答 · 共46题"},
@@ -491,10 +508,10 @@ function go(view, params){
 function render(){
   clearTimer();
   document.body.dataset.view = App.view;
-  var fn = {home:viewHome, tags:viewTags, lookup:viewLookup, me:viewMe, practice:viewPractice}[App.view] || viewHome;
+  var fn = {home:viewHome, tags:viewTags, lookup:viewLookup, me:viewMe, practice:viewPractice, bank:viewBank}[App.view] || viewHome;
   document.getElementById("view").innerHTML = fn();
   // tabbar
-  var map = {home:"home", tags:"tags", lookup:"lookup", me:"me"};
+  var map = {home:"home", tags:"tags", lookup:"lookup", me:"me", bank:"me"};
   document.querySelectorAll(".tabbar button").forEach(function(b){
     b.classList.toggle("on", b.dataset.tab === map[App.view]);
   });
@@ -511,6 +528,7 @@ function afterRender(){
     save();
     setTimeout(function(){ toast("提示：左右滑动也可以切换题目"); }, 700);
   }
+  initBankDrop();
   var search = document.getElementById("lk-search");
   if(search){
     search.addEventListener("input", function(e){
@@ -548,7 +566,7 @@ function viewHome(){
   h += '<section class="hero">';
   h += '<div class="kicker">Youth League School · 49</div>';
   h += '<h1>第49期青共校<br>高效刷题</h1>';
-  h += '<p>'+nowStr()+' · 104题 · 9大考点 · 自动记录薄弱点</p>';
+  h += '<p>'+nowStr()+' · '+QS.length+'题 · '+TAGS.length+'大考点 · 自动记录薄弱点</p>';
   h += '<div class="hero-row"><div class="grow">';
   h += '<div class="stat-grid" style="grid-template-columns:1fr 1fr;margin-top:0">';
   h += '<div class="stat" style="background:transparent;border:0;text-align:left;padding:0"><b>'+practiced+'<span style="font-size:12px;font-weight:400;color:var(--muted)">/'+total+'</span></b><span>已练题目</span></div>';
@@ -614,7 +632,7 @@ function viewHome(){
     h += '</div></section>';
   }
 
-  h += '<div style="text-align:center;color:var(--muted);font-size:11.5px;margin-top:26px;line-height:1.8">数据保存在本机浏览器 · 换设备前可到「我的」导出<br>题目与答案整理自《第49期青共校学习资料》</div>';
+  h += '<div style="text-align:center;color:var(--muted);font-size:11.5px;margin-top:26px;line-height:1.8">数据保存在本机浏览器 · 换设备前可到「我的」导出<br>题库：'+esc((BANK.meta && BANK.meta.title) || '第49期青共校学习资料')+'</div>';
   return h;
 }
 function accOf(list){
@@ -736,6 +754,555 @@ function viewLookup(){
   return h;
 }
 
+/* ============================ 题库管理 ============================ */
+var pendingBank = null;
+var bankBusy = "";
+
+var BANK_TAG_RULES = [
+  ["校情校史", ["苏州科技大学", "校训", "顾菊平"]],
+  ["团史团务", ["共青团", "团章", "团员", "团支部", "团旗", "团徽", "团歌", "团一大", "青年团", "入团", "团中央", "三会二制一课"]],
+  ["青年工作", ["青年", "青联", "五四奖章", "青年运动"]],
+  ["党史国史", ["遵义会议", "八七会议", "中共一大", "中共二大", "大革命", "辛亥革命", "五四", "毛泽东", "土地革命", "论持久战", "共产党宣言", "抗日战争", "十一届三中全会", "南昌起义", "井冈山", "解放战争", "建党", "红军"]],
+  ["军事国防", ["人民军队", "建军", "强军", "国防"]],
+  ["党章党规党纪", ["党章", "党的纪律", "纪律检查", "党员", "民主集中制", "统一战线", "从严治党", "党内"]],
+  ["时政热点", ["2024", "2025", "两会", "求是", "亚运会", "哪吒", "新质生产力", "教育强国", "乡村振兴", "人造太阳", "内卷", "美丽中国", "十四五", "十五五", "新年贺词"]],
+  ["党的二十大精神", ["二十大", "二十届"]],
+  ["习近平新时代中国特色社会主义思想", ["习近平", "中国式现代化", "新时代", "中国特色社会主义", "五位一体", "四个全面", "初心", "使命"]],
+  ["马克思主义", ["马克思主义", "毛泽东思想", "活的灵魂"]]
+];
+
+function autoTag(q){
+  var text = q.stem + " " + q.answer;
+  for(var i = 0; i < BANK_TAG_RULES.length; i++){
+    var kws = BANK_TAG_RULES[i][1];
+    for(var j = 0; j < kws.length; j++){
+      if(text.indexOf(kws[j]) >= 0) return BANK_TAG_RULES[i][0];
+    }
+  }
+  return "未分类";
+}
+
+/* ---------- 读取 .docx ---------- */
+function docxParaText(p){
+  var s = "";
+  function walk(node){
+    for(var i = 0; i < node.childNodes.length; i++){
+      var c = node.childNodes[i];
+      if(c.nodeType !== 1) continue;
+      var ln = c.localName;
+      if(ln === "t") s += c.textContent;
+      else if(ln === "tab") s += "\t";
+      else if(ln === "br" || ln === "cr") s += "\n";
+      else if(ln === "p") { /* 跳过嵌套段落 */ }
+      else walk(c);
+    }
+  }
+  walk(p);
+  return s;
+}
+
+function unzipEntry(bytes, name){
+  return new Promise(function(resolve, reject){
+    try{
+      var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      var eocd = -1, min = Math.max(0, bytes.length - 65557);
+      for(var i = bytes.length - 22; i >= min; i--){
+        if(dv.getUint32(i, true) === 0x06054b50){ eocd = i; break; }
+      }
+      if(eocd < 0) return reject(new Error("这不是有效的 .docx 文件"));
+      var count = dv.getUint16(eocd + 10, true);
+      var off = dv.getUint32(eocd + 16, true);
+      for(var k = 0; k < count; k++){
+        if(dv.getUint32(off, true) !== 0x02014b50) break;
+        var method = dv.getUint16(off + 10, true);
+        var csize = dv.getUint32(off + 20, true);
+        var nlen = dv.getUint16(off + 28, true);
+        var elen = dv.getUint16(off + 30, true);
+        var clen = dv.getUint16(off + 32, true);
+        var lho = dv.getUint32(off + 42, true);
+        var fn = new TextDecoder().decode(bytes.subarray(off + 46, off + 46 + nlen));
+        if(fn === name){
+          var lnlen = dv.getUint16(lho + 26, true);
+          var lelen = dv.getUint16(lho + 28, true);
+          var start = lho + 30 + lnlen + lelen;
+          var data = bytes.subarray(start, start + csize);
+          if(method === 0) return resolve(new TextDecoder("utf-8").decode(data));
+          if(method === 8){
+            if(typeof DecompressionStream === "undefined"){
+              return reject(new Error("当前浏览器不支持解压，请用 Chrome / Edge 打开，或改用 JSON 导入"));
+            }
+            var ds = new DecompressionStream("deflate-raw");
+            var stream = new Blob([data]).stream().pipeThrough(ds);
+            return new Response(stream).text().then(resolve, reject);
+          }
+          return reject(new Error("不支持的压缩格式"));
+        }
+        off += 46 + nlen + elen + clen;
+      }
+      reject(new Error("docx 里找不到正文（word/document.xml）"));
+    }catch(e){ reject(e); }
+  });
+}
+
+function readDocxParagraphs(file){
+  return file.arrayBuffer().then(function(buf){
+    return unzipEntry(new Uint8Array(buf), "word/document.xml");
+  }).then(function(xml){
+    var doc = new DOMParser().parseFromString(xml, "application/xml");
+    if(doc.getElementsByTagName("parsererror").length) throw new Error("Word 内容解析失败");
+    var ps = doc.getElementsByTagNameNS("*", "p");
+    var out = [];
+    for(var i = 0; i < ps.length; i++) out.push(docxParaText(ps[i]));
+    return out;
+  });
+}
+
+/* ---------- 把 Word 文本变成题库 ---------- */
+function isOptLine(t){
+  return /^\s*[A-D]\s*[.．、，,:：]/.test(t) || /^\s*[①②③④⑤⑥⑦⑧]/.test(t);
+}
+
+function splitInlineOptions(text){
+  var rx = /(^|[\s])([A-D])\s*(?:[.．、，,]\s*)?(?=\S)/g;
+  var marks = [], seen = {}, m;
+  while((m = rx.exec(text)) !== null){
+    var letter = m[2];
+    if(seen[letter]) continue;
+    seen[letter] = 1;
+    marks.push({start: m.index + m[1].length, letter: letter, end: rx.lastIndex});
+  }
+  if(!marks.length) return [];
+  var out = [];
+  for(var i = 0; i < marks.length; i++){
+    var end = (i + 1 < marks.length) ? marks[i + 1].start : text.length;
+    out.push({letter: marks[i].letter, v: text.slice(marks[i].end, end).trim()});
+  }
+  return out;
+}
+
+function collectBlocks(P, start, end){
+  var blocks = [], cur = null;
+  for(var i = start; i < end; i++){
+    var t = P[i];
+    if(!t) continue;
+    if(/^[一二三]、\s*(单选|多选|简答)/.test(t)) continue;
+    if(isOptLine(t)){ if(cur) cur.body.push(t); continue; }
+    if(cur && t.indexOf("②") >= 0 && !isOptLine(t)){ cur.body.push(t); continue; }
+    if(cur) blocks.push(cur);
+    cur = {stem: t, body: []};
+  }
+  if(cur) blocks.push(cur);
+  return blocks;
+}
+
+function buildQuestions(blocks, type){
+  var out = [];
+  blocks.forEach(function(b){
+    var stem = b.stem.trim();
+    stem = stem.replace(/^\s*30(?=习近平)/, "").replace(/^\s*31(?=为深入)/, "")
+               .replace(/^\s*\d{1,3}\s*[.．、]\s*(?=\S)/, "");
+    var options = [], material = [];
+    b.body.forEach(function(line){
+      if(/^\s*[①②③④⑤⑥⑦⑧]/.test(line)){ material.push(line); return; }
+      var parts = splitInlineOptions(line);
+      if(parts.length){
+        parts.forEach(function(p){ if(p.v) options.push({k: p.letter, v: p.v}); });
+      }else{
+        material.push(line);
+      }
+    });
+    options.sort(function(a, b){ return a.k < b.k ? -1 : 1; });
+    var items = [];
+    material.forEach(function(line){
+      var chunks = line.split(/[①②③④⑤⑥⑦⑧]/);
+      var nums = line.match(/[①②③④⑤⑥⑦⑧]/g) || [];
+      if(nums.length){
+        if(chunks[0].trim()) items.push("①" + chunks[0].trim());
+        for(var k = 0; k < nums.length; k++){
+          var c = chunks[k + 1];
+          if(c && c.trim()) items.push(nums[k] + c.trim());
+        }
+      }else if(line.trim()){
+        items.push(line.trim());
+      }
+    });
+    out.push({type: type, stem: stem, material: items, options: options, answer: "", explanation: ""});
+  });
+  return out;
+}
+
+function parseAnswerBlocks(P, start, end, letters){
+  var out = [], cur = null;
+  for(var i = start; i < end; i++){
+    var t = P[i];
+    if(!t) continue;
+    var m = letters
+      ? t.match(/^(?:答\s*案|案)\s*[是为:]?\s*[:：]?\s*([A-D]+)/)
+      : t.match(/^(?:答\s*案|案)\s*[是为:]?\s*[:：]?\s*(.+)$/);
+    if(m){
+      if(cur) out.push(cur);
+      cur = {ans: m[1].trim(), text: t};
+    }else if(cur){
+      cur.text += "\n" + t;
+    }
+  }
+  if(cur) out.push(cur);
+  return out;
+}
+
+function cleanExpl(text){
+  var t = String(text || "").trim();
+  for(var i = 0; i < 3; i++){
+    var before = t;
+    t = t.replace(/^(?:答\s*案|案)\s*(?:是|为)?\s*[:：]?\s*/, "");
+    t = t.replace(/^[A-D]+\s*[。.、:：]?\s*/, "");
+    t = t.replace(/^【解析】\s*/, "");
+    t = t.replace(/^解析\s*[:：]\s*/, "");
+    t = t.trim();
+    if(t === before) break;
+  }
+  return t;
+}
+
+function cleanShortAnswer(text){
+  return String(text || "").replace(/^(?:答\s*案|案)\s*[是为:]?\s*[:：]?\s*/, "").trim();
+}
+
+function buildBankFromParas(paras){
+  var P = paras.map(function(s){
+    return String(s || "").replace(/\u00a0/g, " ").replace(/\u3000/g, " ").trim();
+  });
+  function find(re, from){
+    for(var i = from || 0; i < P.length; i++){ if(re.test(P[i])) return i; }
+    return -1;
+  }
+  var i1 = find(/^一、\s*单选/), i2 = find(/^二、\s*多选/), i3 = find(/^三、\s*简答/), ia = find(/^答案解析/);
+  if(i1 < 0 || i2 < 0 || i3 < 0 || ia < 0){
+    throw new Error("没找到「一、单选 / 二、多选 / 三、简答题 / 答案解析」，请确认是原始格式的 Word");
+  }
+  var i1a = find(/^一、\s*单选/, ia + 1);
+  var i2a = find(/^二、\s*多选/, i1a + 1);
+  var i3a = find(/^三、\s*简答/, i2a + 1);
+  if(i1a < 0 || i2a < 0 || i3a < 0) throw new Error("答案区缺少「一、单选 / 二、多选 / 三、简答题」标题");
+
+  var singles = buildQuestions(collectBlocks(P, i1 + 1, i2), "single");
+  var multis = buildQuestions(collectBlocks(P, i2 + 1, i3), "multi");
+  var shorts = collectBlocks(P, i3 + 1, ia).map(function(b){
+    var stem = b.stem.trim().replace(/^\s*\d{1,3}\s*[.．、]\s*(?=\S)/, "");
+    return {type: "short", stem: stem, material: [], options: [], answer: "", explanation: ""};
+  });
+
+  var aS = parseAnswerBlocks(P, i1a + 1, i2a, true);
+  var aM = parseAnswerBlocks(P, i2a + 1, i3a, true);
+  var aJ = parseAnswerBlocks(P, i3a + 1, P.length, false);
+
+  if(singles.length !== aS.length) throw new Error("单选题 " + singles.length + " 道，答案 " + aS.length + " 条，数量不一致");
+  if(multis.length !== aM.length) throw new Error("多选题 " + multis.length + " 道，答案 " + aM.length + " 条，数量不一致");
+  if(shorts.length !== aJ.length) throw new Error("简答题 " + shorts.length + " 道，答案 " + aJ.length + " 条，数量不一致");
+
+  var issues = [];
+  function fill(list, answers, label){
+    list.forEach(function(q, i){
+      var a = answers[i];
+      var name = label + "第 " + (i + 1) + " 题";
+      if(q.type === "short"){
+        q.answer = cleanShortAnswer(a.text);
+        if(!q.answer) issues.push(name + " 没有答案");
+      }else{
+        q.answer = a.ans;
+        q.explanation = cleanExpl(a.text);
+        if(!/^[A-D]+$/.test(q.answer)) issues.push(name + " 答案格式不对：" + q.answer);
+        if(q.options.length !== 4) issues.push(name + " 选项不是 4 个（" + q.options.length + "）");
+        q.answer.split("").forEach(function(c){
+          if(!q.options.some(function(o){ return o.k === c; })) issues.push(name + " 答案 " + c + " 不在选项里");
+        });
+        if(!q.explanation) issues.push(name + " 没有解析");
+      }
+      q.tag = autoTag(q);
+    });
+  }
+  fill(singles, aS, "单选");
+  fill(multis, aM, "多选");
+  fill(shorts, aJ, "简答");
+
+  var counts = {single: singles.length, multi: multis.length, short: shorts.length};
+  var all = singles.concat(multis, shorts);
+  var nums = {single: 0, multi: 0, short: 0};
+  all.forEach(function(q){
+    nums[q.type]++;
+    q.num = nums[q.type];
+    q.id = ({single: "s", multi: "m", short: "j"})[q.type] + q.num;
+  });
+
+  var used = {};
+  all.forEach(function(q){ used[q.tag] = 1; });
+  var tags = BANK_TAG_RULES.map(function(r){ return r[0]; }).filter(function(t){ return used[t]; });
+  if(used["未分类"]) tags.push("未分类");
+
+  var title = P.slice(0, i1).filter(Boolean)[0] || "自定义题库";
+  title = title.slice(0, 40);
+
+  return {
+    meta: {title: title, tags: tags, version: Date.now(), counts: counts, source: "Word 导入"},
+    questions: all,
+    issues: issues
+  };
+}
+
+/* ---------- JSON 题库 ---------- */
+function normalizeBank(data){
+  var qs = Array.isArray(data) ? data : (data && data.questions);
+  if(!Array.isArray(qs) || !qs.length) throw new Error("不是有效的题库文件");
+  var out = [], issues = [];
+  var nums = {single: 0, multi: 0, short: 0};
+  qs.forEach(function(q, i){
+    var type = q.type;
+    if(type !== "single" && type !== "multi" && type !== "short"){
+      type = (Array.isArray(q.options) && q.options.length)
+        ? (String(q.answer || "").length > 1 ? "multi" : "single")
+        : "short";
+    }
+    var opts = (q.options || []).map(function(o){
+      return {
+        k: String(o.k || o.key || o.letter || "").toUpperCase(),
+        v: String(o.v || o.value || o.text || "")
+      };
+    }).filter(function(o){ return o.k && o.v; });
+    var stem = String(q.stem || q.question || "").trim();
+    var answer = String(q.answer || "").trim();
+    var name = "第 " + (i + 1) + " 题";
+    if(!stem) issues.push(name + " 没有题干");
+    if(type === "short"){
+      if(!answer) issues.push(name + " 没有答案");
+    }else{
+      if(opts.length !== 4) issues.push(name + " 选项不是 4 个");
+      if(!/^[A-D]+$/.test(answer)) issues.push(name + " 答案无效");
+      else answer.split("").forEach(function(c){
+        if(!opts.some(function(o){ return o.k === c; })) issues.push(name + " 答案 " + c + " 不在选项里");
+      });
+      if(!q.explanation) issues.push(name + " 没有解析");
+    }
+    nums[type]++;
+    out.push({
+      type: type, num: nums[type], tag: q.tag || "未分类", stem: stem,
+      material: Array.isArray(q.material) ? q.material.map(String) : [],
+      options: opts, answer: answer, explanation: String(q.explanation || ""),
+      id: ({single: "s", multi: "m", short: "j"})[type] + nums[type]
+    });
+  });
+  var counts = {single: 0, multi: 0, short: 0};
+  var tags = [];
+  out.forEach(function(q){
+    counts[q.type]++;
+    if(q.tag && tags.indexOf(q.tag) < 0) tags.push(q.tag);
+  });
+  var title = (data && data.meta && data.meta.title) || "导入的题库";
+  return {
+    meta: {title: title, tags: tags, version: Date.now(), counts: counts, source: "JSON 导入"},
+    questions: out,
+    issues: issues
+  };
+}
+
+/* ---------- 导入 / 应用 ---------- */
+function pickBankFile(accept){
+  var inp = document.createElement("input");
+  inp.type = "file";
+  inp.accept = accept;
+  inp.onchange = function(){
+    var f = inp.files && inp.files[0];
+    if(!f) return;
+    if(/\.docx$/i.test(f.name)) importDocxFile(f);
+    else if(/\.json$/i.test(f.name)) importJsonFile(f);
+    else toast("请选择 .docx 或 .json 文件");
+  };
+  inp.click();
+}
+
+function importDocxFile(file){
+  bankBusy = "正在解析 Word…";
+  toast(bankBusy);
+  readDocxParagraphs(file).then(function(paras){
+    var bank = buildBankFromParas(paras);
+    pendingBank = bank;
+    bankBusy = "";
+    render();
+    toast("解析完成，请确认替换");
+  }).catch(function(e){
+    bankBusy = "";
+    toast("解析失败：" + (e.message || e));
+  });
+}
+
+function importJsonFile(file){
+  var r = new FileReader();
+  r.onload = function(){
+    try{
+      var data = JSON.parse(r.result);
+      pendingBank = normalizeBank(data);
+      render();
+      toast("读取完成，请确认替换");
+    }catch(e){
+      toast("读取失败：" + (e.message || e));
+    }
+  };
+  r.readAsText(file, "utf-8");
+}
+
+function fetchBankUrl(url){
+  toast("正在读取题库…");
+  fetch(url, {cache: "no-store"}).then(function(r){
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function(data){
+    pendingBank = normalizeBank(data);
+    render();
+    toast("读取成功，请确认");
+  }).catch(function(e){
+    toast("读取失败：" + (e.message || "网络错误"));
+  });
+}
+
+function remapProgress(oldQs, newBank){
+  var oldMap = {};
+  oldQs.forEach(function(q){ oldMap[q.id] = q; });
+  var byStem = {};
+  newBank.questions.forEach(function(q){ byStem[q.stem.trim()] = q.id; });
+  function map(obj){
+    var r = {};
+    for(var id in obj){
+      var q = oldMap[id];
+      if(!q) continue;
+      var nid = byStem[q.stem.trim()];
+      if(nid) r[nid] = obj[id];
+    }
+    return r;
+  }
+  S.prog = map(S.prog);
+  S.wrong = map(S.wrong);
+  S.fav = map(S.fav);
+  S.stat = map(S.stat);
+  S.sess = null;
+}
+
+function applyPendingBank(){
+  if(!pendingBank) return;
+  var nb = pendingBank;
+  remapProgress(QS, nb);
+  var clean = {
+    meta: {title: nb.meta.title, tags: nb.meta.tags, version: Date.now(),
+           counts: nb.meta.counts, source: nb.meta.source},
+    questions: nb.questions
+  };
+  try{
+    localStorage.setItem(CUSTOM_BANK_KEY, JSON.stringify(clean));
+  }catch(e){
+    toast("题库太大，浏览器存不下");
+    return;
+  }
+  save();
+  toast("题库已替换，正在刷新…");
+  setTimeout(function(){ location.reload(); }, 600);
+}
+
+function resetBank(){
+  if(!CUSTOM_BANK){ toast("当前就是内置题库"); return; }
+  if(!confirm("恢复第49期内置题库？能对上的做题记录会保留。")) return;
+  remapProgress(QS, BUILTIN_BANK);
+  try{ localStorage.removeItem(CUSTOM_BANK_KEY); }catch(e){}
+  save();
+  toast("已恢复内置题库");
+  setTimeout(function(){ location.reload(); }, 500);
+}
+
+function exportBank(){
+  var blob = new Blob([JSON.stringify(BANK, null, 1)], {type: "application/json"});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "题库.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast("已导出题库");
+}
+
+function bankPreviewHTML(b){
+  var issues = b.issues || [];
+  var h = '<div class="card" style="margin-top:14px;padding:16px;border-color:var(--brand)">';
+  h += '<div style="display:flex;align-items:center;gap:8px"><b style="font-size:14px">待导入预览</b><span class="chip brand">' + b.questions.length + ' 题</span></div>';
+  h += '<div class="small" style="margin-top:8px">单选 ' + b.meta.counts.single + ' · 多选 ' + b.meta.counts.multi + ' · 简答 ' + b.meta.counts.short + '</div>';
+  if(issues.length){
+    h += '<div class="small" style="margin-top:8px;color:var(--bad)">'
+       + issues.slice(0, 4).map(esc).join("<br>")
+       + (issues.length > 4 ? '<br>…共 ' + issues.length + ' 条提醒' : '')
+       + '</div>';
+  }
+  h += '<div class="small muted" style="margin-top:10px">预览：</div>';
+  h += '<div class="small" style="margin-top:4px;line-height:1.7">'
+     + b.questions.slice(0, 3).map(function(q){ return esc(q.stem.slice(0, 44)) + "…"; }).join("<br>")
+     + '</div>';
+  h += '<div class="self-grade" style="margin-top:12px"><button class="btn" data-act="bank:cancel">取消</button><button class="btn primary" data-act="bank:apply">确认替换</button></div>';
+  h += '</div>';
+  return h;
+}
+
+function initBankDrop(){
+  var dz = document.getElementById("bank-drop");
+  if(!dz || dz.dataset.ready) return;
+  dz.dataset.ready = "1";
+  ["dragenter", "dragover"].forEach(function(ev){
+    dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.add("drag"); });
+  });
+  dz.addEventListener("dragleave", function(){ dz.classList.remove("drag"); });
+  dz.addEventListener("drop", function(e){
+    e.preventDefault();
+    dz.classList.remove("drag");
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if(!f) return;
+    if(/\.docx$/i.test(f.name)) importDocxFile(f);
+    else if(/\.json$/i.test(f.name)) importJsonFile(f);
+    else toast("请拖入 .docx 或 .json 文件");
+  });
+}
+
+function viewBank(){
+  var cur = CUSTOM_BANK ? "自定义题库" : "内置题库";
+  var src = (CUSTOM_BANK && CUSTOM_BANK.meta && CUSTOM_BANK.meta.title) ? CUSTOM_BANK.meta.title : "第49期青共校学习资料";
+  var h = '';
+  h += '<section class="sec" style="margin-top:6px">';
+  h += '<div class="sec-h"><h2>题库管理</h2><span>更换 · 导入 · 导出</span></div>';
+  h += '<div class="card" style="padding:16px">';
+  h += '<div style="display:flex;align-items:center;gap:10px"><div class="grow">';
+  h += '<b style="font-size:14px">' + cur + '</b>';
+  h += '<span class="small muted" style="display:block">' + QS.length + ' 题 · 单选 ' + byType("single").length + ' / 多选 ' + byType("multi").length + ' / 简答 ' + byType("short").length + '</span>';
+  h += '</div><span class="chip brand">使用中</span></div>';
+  h += '<div class="small muted" style="margin-top:8px">来源：' + esc(src) + '</div>';
+  h += '<div class="small muted" style="margin-top:10px;line-height:1.7">导入新题库后，会按题目内容自动保留能对上的做题记录；对不上的旧记录会被清除。</div>';
+  h += '</div>';
+
+  h += '<div class="sec-h" style="margin-top:18px"><h2>导入新题库</h2><span>Word 原文件即可</span></div>';
+  h += '<div class="quick-grid">';
+  h += '<button class="quick" data-act="bank:docx"><span class="qi">W</span><div><b>导入 Word</b><span>.docx · 原题 + 答案解析</span></div></button>';
+  h += '<button class="quick" data-act="bank:json"><span class="qi">{ }</span><div><b>导入 JSON</b><span>题库数据文件</span></div></button>';
+  h += '</div>';
+  h += '<div class="card" id="bank-drop" style="margin-top:10px;padding:18px;text-align:center;border-style:dashed">';
+  h += '<div class="small muted">也可以把 .docx / .json 文件拖到这里</div></div>';
+
+  h += '<div class="card" style="margin-top:10px;padding:14px 16px">';
+  h += '<div class="small muted" style="margin-bottom:8px">从链接更新（例如仓库里的 bank.json）</div>';
+  h += '<div style="display:flex;gap:8px"><input id="bank-url" class="ta" style="margin:0;min-height:auto;padding:9px 12px;font-size:13px" value="bank.json" />';
+  h += '<button class="btn" style="flex:0 0 auto" data-act="bank:url">读取</button></div>';
+  h += '</div>';
+
+  if(pendingBank) h += bankPreviewHTML(pendingBank);
+
+  h += '<div class="sec-h" style="margin-top:18px"><h2>当前题库</h2></div><div class="card">';
+  h += '<div class="tb-row"><div class="grow"><b>导出当前题库</b><span>得到 JSON，可备份或发给别人</span></div><button class="btn" style="padding:7px 12px;font-size:12px" data-act="bank:export">导出</button></div>';
+  h += '<div class="tb-row"><div class="grow"><b>恢复内置题库</b><span>' + (CUSTOM_BANK ? "回到第49期原始题库" : "当前就是内置题库") + '</span></div><button class="btn" style="padding:7px 12px;font-size:12px" data-act="bank:reset" ' + (CUSTOM_BANK ? "" : "disabled") + '>恢复</button></div>';
+  h += '</div></section>';
+  return h;
+}
+
 /* ============================ 我的 ============================ */
 function viewMe(){
   var total = QS.length;
@@ -789,6 +1356,11 @@ function viewMe(){
   h += '<div class="tb-row"><div class="grow"><b>清空全部进度</b><span>包括错题、收藏与掌握记录</span></div><button class="btn" style="padding:7px 12px;font-size:12px;color:var(--bad)" data-act="reset">清空</button></div>';
   h += '</div></section>';
 
+  h += '<section class="sec"><div class="sec-h"><h2>题库</h2><span>当前 '+QS.length+' 题</span></div><div class="card">';
+  h += '<button class="tb-row" style="width:100%;text-align:left;background:transparent;border:0;border-bottom:0;cursor:pointer" data-act="nav:bank">';
+  h += '<div class="grow"><b>题库管理</b><span>导入 Word / JSON，一键更换题库</span></div><span style="color:var(--muted)">→</span></button>';
+  h += '</div></section>';
+
   h += '<section class="sec"><div class="sec-h"><h2>怎么用</h2></div><div class="card" style="padding:16px 18px;font-size:13.5px;line-height:1.95">';
   h += '<p style="margin:0 0 8px"><b>① 分题型</b>：先按单选→多选→简答各刷一遍，熟悉出题方式。</p>';
   h += '<p style="margin:0 0 8px"><b>② 分考点</b>：正确率最低的考点优先，集中突破。</p>';
@@ -797,7 +1369,7 @@ function viewMe(){
   h += '</div></section>';
 
   h += '<div style="text-align:center;color:var(--muted);font-size:11.5px;margin:24px 0 0;line-height:1.8">';
-  h += '题库来源：附件1 · 第49期青共校学习资料<br>答案与解析均保留原文，仅供学习使用</div>';
+  h += '题库来源：'+esc((BANK.meta && BANK.meta.source) || '附件1 · 第49期青共校学习资料')+'<br>答案与解析均保留原文，仅供学习使用</div>';
   return h;
 }
 
@@ -1172,6 +1744,16 @@ var ACTIONS = {
     saveSession(); render();
   },
   "mark": function(m){ markShort(m); },
+  "bank:docx": function(){ pickBankFile(".docx"); },
+  "bank:json": function(){ pickBankFile(".json"); },
+  "bank:url": function(){
+    var el = document.getElementById("bank-url");
+    fetchBankUrl(((el && el.value) || "bank.json").trim());
+  },
+  "bank:apply": function(){ applyPendingBank(); },
+  "bank:cancel": function(){ pendingBank = null; render(); },
+  "bank:export": function(){ exportBank(); },
+  "bank:reset": function(){ resetBank(); },
   "export": function(){
     var data = {app:"青共校刷题", exported:new Date().toISOString(), state:S};
     var blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
